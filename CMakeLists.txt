@@ -1,0 +1,20 @@
+cmake_minimum_required(VERSION 3.24)
+project(flat_map VERSION 0.1.0 LANGUAGES CXX)
+
+# Header-only C++20 container; no external dependencies.
+add_library(flat_map INTERFACE)
+add_library(flat_map::flat_map ALIAS flat_map)
+target_include_directories(flat_map INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_compile_features(flat_map INTERFACE cxx_std_20)
+
+if(PROJECT_IS_TOP_LEVEL)
+  enable_testing()
+  add_executable(flat_map_test test/test.cc)
+  target_link_libraries(flat_map_test PRIVATE flat_map::flat_map)
+  add_test(NAME flat_map_test COMMAND flat_map_test)
+  add_executable(flat_map_comparators test/comparators.cc)
+  target_link_libraries(flat_map_comparators PRIVATE flat_map::flat_map)
+  add_test(NAME flat_map_comparators COMMAND flat_map_comparators)
+  add_executable(flat_map_demo examples/demo.cc)
+  target_link_libraries(flat_map_demo PRIVATE flat_map::flat_map)
+endif()

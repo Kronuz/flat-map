@@ -26,24 +26,32 @@ Link `flat_map::flat_map`. Tests and the demo build only when this repository is
 6. `flat_map_merge` traverses two compatibly ordered maps once. Callbacks must not mutate either input. Output ownership and exception cleanup belong to the caller; the function does not roll back callback output.
 7. Allocator customization, internal synchronization and budgeted sorting are outside this API. Callers bound input size, scratch memory and execution time. No wire or disk format is defined.
 
-## Performance notes
+## Search and insertion
 
 Integer keys under `std::less<>`/`std::less<Key>` search with a branchless
-lower bound (the compare feeds a conditional move; `std::lower_bound` with a
-lambda mispredicts about half of its steps). Other keys and comparators keep
-`std::lower_bound`. When both key and mapped type are trivially copyable,
-insertion shifts the tail with one `memmove` instead of an element-wise move
-loop (`std::pair` is not trivially copyable, so the standard library does not
-do this itself). Apple arm64, u64 keys, ns per op (random insert / find):
+lower bound: the compare feeds a conditional move, while `std::lower_bound`
+with a lambda mispredicts about half of its steps. Other keys and comparators
+use `std::lower_bound`. When both key and mapped type are trivially copyable,
+insertion shifts the tail with one `memmove`; `std::pair` is not trivially
+copyable, so the standard library uses an element-wise move loop. Insertion
+into the middle is O(n); use `flat_map_builder` for bulk loads.
 
-| n | before | now | boost flat_map |
-|---|---|---|---|
-| 256 | 34.3 / 6.5 | 24.9 / 3.3 | 29.3 / 6.7 |
-| 4096 | 290.7 / 9.7 | 167.4 / 6.2 | 172.4 / 11.2 |
-| 65536 | 5237 / 35.3 | 3605 / 23.7 | 3587 / 36.4 |
+## Performance
 
-Insertion into the middle stays O(n) by nature; use `flat_map_builder` for bulk
-loads. Reproduce with the `flat_map_bench` target.
+Apple arm64, `u64` keys, ns per op (random insert / find):
+
+| n | flat-map | boost flat_map |
+|---|---|---|
+| 256 | 24.9 / 3.3 | 29.3 / 6.7 |
+| 4096 | 167.4 / 6.2 | 172.4 / 11.2 |
+| 65536 | 3605 / 23.7 | 3587 / 36.4 |
+
+The benchmark needs abseil, and boost for the `flat_map` column:
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target flat_map_bench && ./build/flat_map_bench
+```
 
 ## Build
 
@@ -53,4 +61,4 @@ cmake --build build --parallel 4
 ctest --test-dir build --output-on-failure
 ```
 
-CI covers Linux, macOS and FreeBSD with ASan/UBSan. TSan is excluded because the container has no concurrent API. MIT license; see [LICENSE](LICENSE).
+CI covers Linux, macOS and FreeBSD with ASan/UBSan. TSan is excluded because the container has no concurrent API. [CHANGELOG.md](CHANGELOG.md) lists what changed. MIT license; see [LICENSE](LICENSE).

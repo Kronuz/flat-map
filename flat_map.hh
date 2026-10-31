@@ -198,10 +198,8 @@ public:
 private:
 	friend class flat_map_builder<Key, T, Compare>;
 
-	// Integer keys under the default ordering use a branchless search: the
-	// compare feeds a conditional move, so there is no data-dependent branch to
-	// mispredict (std::lower_bound mispredicts about half of its ~log2 n steps).
-	// Any other key or comparator keeps std::lower_bound.
+	// Integer keys under the default ordering search branchlessly (the compare
+	// feeds a conditional move); other keys and comparators use std::lower_bound.
 	template <class K>
 	static constexpr bool branchless_search =
 		std::is_integral_v<Key> && std::is_integral_v<K> &&
@@ -236,9 +234,8 @@ private:
 		return lower_bound_search(v_.begin(), v_.end(), k);
 	}
 
-	// Inserts v before `it`. When both halves are trivially copyable the shift
-	// is one memmove (std::pair itself is not trivially copyable, so the
-	// library's element-wise move loop would not be turned into one).
+	// Inserts v before `it`. With trivially copyable halves the shift is one
+	// memmove; std::pair itself is not trivially copyable.
 	iterator insert_at(iterator it, value_type&& v) {
 		if constexpr (std::is_trivially_copyable_v<Key> && std::is_trivially_copyable_v<T>) {
 			const auto idx = static_cast<std::size_t>(it - v_.begin());

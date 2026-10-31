@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <iterator>
 #include <limits>
@@ -197,15 +198,61 @@ public:
 private:
 	friend class flat_map_builder<Key, T, Compare>;
 
+	// Integer keys under the default ordering use a branchless search: the
+	// compare feeds a conditional move, so there is no data-dependent branch to
+	// mispredict (std::lower_bound mispredicts about half of its ~log2 n steps).
+	// Any other key or comparator keeps std::lower_bound.
+	template <class K>
+	static constexpr bool branchless_search =
+		std::is_integral_v<Key> && std::is_integral_v<K> &&
+		(std::is_same_v<Compare, std::less<>> || std::is_same_v<Compare, std::less<Key>>) &&
+		std::is_signed_v<Key> == std::is_signed_v<K>;
+
+	template <class Iter, class K>
+	[[nodiscard]] Iter lower_bound_search(Iter first, Iter last, const K& k) const {
+		if constexpr (branchless_search<K>) {
+			auto n = static_cast<std::size_t>(last - first);
+			if (n == 0)
+				return first;
+			Iter base = first;
+			while (n > 1) {
+				const std::size_t half = n / 2;
+				base = (base[half - 1].first < k) ? base + half : base;
+				n -= half;
+			}
+			return base + (base->first < k ? 1 : 0);
+		} else {
+			return std::lower_bound(first, last, k,
+			                        [this](const value_type& e, const K& key) { return comp_(e.first, key); });
+		}
+	}
+
 	template <class K>
 	[[nodiscard]] auto lower_bound_impl(const K& k) {
-		return std::lower_bound(v_.begin(), v_.end(), k,
-		                        [this](const value_type& e, const K& key) { return comp_(e.first, key); });
+		return lower_bound_search(v_.begin(), v_.end(), k);
 	}
 	template <class K>
 	[[nodiscard]] auto lower_bound_impl(const K& k) const {
-		return std::lower_bound(v_.begin(), v_.end(), k,
-		                        [this](const value_type& e, const K& key) { return comp_(e.first, key); });
+		return lower_bound_search(v_.begin(), v_.end(), k);
+	}
+
+	// Inserts v before `it`. When both halves are trivially copyable the shift
+	// is one memmove (std::pair itself is not trivially copyable, so the
+	// library's element-wise move loop would not be turned into one).
+	iterator insert_at(iterator it, value_type&& v) {
+		if constexpr (std::is_trivially_copyable_v<Key> && std::is_trivially_copyable_v<T>) {
+			const auto idx = static_cast<std::size_t>(it - v_.begin());
+			const std::size_t n = v_.size();
+			v_.push_back(v);  // grows (or not); v is a local, so reallocation is safe
+			value_type* d = v_.data();
+			if (idx < n)
+				std::memmove(static_cast<void*>(d + idx + 1), static_cast<const void*>(d + idx),
+				             (n - idx) * sizeof(value_type));
+			std::memcpy(static_cast<void*>(d + idx), static_cast<const void*>(&v), sizeof(value_type));
+			return v_.begin() + static_cast<difference_type>(idx);
+		} else {
+			return v_.insert(it, std::move(v));
+		}
 	}
 	template <class Self, class K>
 	static auto find_impl(Self& self, const K& k) {
@@ -233,8 +280,8 @@ private:
 		auto it = lower_bound_impl(k);
 		if (it != v_.end() && !comp_(k, it->first))
 			return {it, false};
-		it = v_.emplace(it, std::piecewise_construct, std::forward_as_tuple(std::forward<K>(k)),
-		                std::forward_as_tuple(std::forward<Args>(args)...));
+		it = insert_at(it, value_type(std::piecewise_construct, std::forward_as_tuple(std::forward<K>(k)),
+		                              std::forward_as_tuple(std::forward<Args>(args)...)));
 		return {it, true};
 	}
 
@@ -246,7 +293,7 @@ private:
 		auto it = lower_bound_impl(v.first);
 		if (it != v_.end() && !comp_(v.first, it->first))
 			return {it, false};
-		it = v_.insert(it, std::move(v));
+		it = insert_at(it, std::move(v));
 		return {it, true};
 	}
 
@@ -261,7 +308,7 @@ private:
 			it->second = std::forward<M>(obj);
 			return {it, false};
 		}
-		it = v_.emplace(it, std::forward<K>(k), std::forward<M>(obj));
+		it = insert_at(it, value_type(std::forward<K>(k), std::forward<M>(obj)));
 		return {it, true};
 	}
 

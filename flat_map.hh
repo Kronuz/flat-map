@@ -20,6 +20,117 @@
 
 namespace kronuz {
 
+namespace flat_map_detail {
+
+// The compare of the branchless search must stay a conditional move: left alone,
+// x86 compilers turn a loop-carried select back into a branch, and random
+// queries then mispredict about half of the steps.
+#if defined(__clang__)
+#define KRONUZ_FLAT_MAP_UNPREDICTABLE(c) __builtin_unpredictable(c)
+#elif defined(__GNUC__)
+#define KRONUZ_FLAT_MAP_UNPREDICTABLE(c) __builtin_expect_with_probability(static_cast<long>(c), 1, 0.5)
+#else
+#define KRONUZ_FLAT_MAP_UNPREDICTABLE(c) (c)
+#endif
+
+inline void prefetch(const void* p) noexcept {
+#if defined(__GNUC__)
+	__builtin_prefetch(p);
+#else
+	(void)p;
+#endif
+}
+
+// The first of the n sorted entries e whose key is not less than k, or e + n.
+// Each search below has the same result; they differ in how they get there. They
+// return a pointer: converting to an index and back costs a few cycles on the
+// dependent chain that ends the lookup.
+
+// std::lower_bound: a branch per step. Predictable when the same keys repeat.
+template <class P, class K, class Less>
+[[nodiscard]] const P* lower_bound_binary(const P* e, std::size_t n, const K& k, const Less& less) {
+	return std::lower_bound(e, e + n, k, [&](const P& entry, const K& key) { return less(entry.first, key); });
+}
+
+// The compare feeds a conditional move: no mispredicts, one load per step.
+template <class P, class K>
+[[nodiscard]] const P* lower_bound_branchless(const P* e, std::size_t n, const K& k) noexcept {
+	if (n == 0)
+		return e;
+	// Pointers, not an index, and the load goes through `next`, which the select reuses: the select
+	// then picks between two addresses already computed, one step shorter on the dependent chain.
+	const P* base = e;
+	while (n > 1) {
+		const std::size_t half = n / 2;
+		const P* next = base + half;
+		base = KRONUZ_FLAT_MAP_UNPREDICTABLE(next[-1].first < k) ? next : base;
+		n -= half;
+	}
+	return base + (base->first < k ? 1 : 0);
+}
+
+// The branchless search plus a prefetch of both candidates of the next step, so
+// a table larger than the cache overlaps its misses instead of chaining them.
+template <class P, class K>
+[[nodiscard]] const P* lower_bound_prefetch(const P* e, std::size_t n, const K& k) noexcept {
+	if (n == 0)
+		return e;
+	const P* base = e;
+	while (n > 1) {
+		const std::size_t half = n / 2;
+		const P* next = base + half;
+		const std::size_t after = (n - half) / 2;  // half of the following step
+		if (after != 0) {
+			prefetch(base + after - 1);  // the following probe, if the select keeps base
+			prefetch(next + after - 1);  // and if it takes next
+		}
+		base = KRONUZ_FLAT_MAP_UNPREDICTABLE(next[-1].first < k) ? next : base;
+		n -= half;
+	}
+	return base + (base->first < k ? 1 : 0);
+}
+
+#undef KRONUZ_FLAT_MAP_UNPREDICTABLE
+
+// A tail shift may copy bytes only where that is what moving each entry does:
+// both halves are trivially copyable (their assignments are byte copies), and the
+// pair is trivially copy- and move-constructible and trivially destructible, so
+// memmove creates the entries it copies ([cstring.syn], implicit-lifetime
+// types). std::pair itself is never trivially copyable: its assignment is
+// user-provided. Volatile halves are excluded: memmove would access them as
+// non-volatile.
+template <class K, class T>
+inline constexpr bool bytewise_shift =
+	std::is_trivially_copyable_v<K> && std::is_trivially_copyable_v<T> && !std::is_volatile_v<K> &&
+	!std::is_volatile_v<T> && std::is_trivially_copy_constructible_v<std::pair<K, T>> &&
+	std::is_trivially_move_constructible_v<std::pair<K, T>> && std::is_trivially_destructible_v<std::pair<K, T>>;
+
+// Which search an integer-keyed map runs over n entries of type P.
+enum class search_kind : unsigned char { branchless, prefetch };
+
+// A table of at least this many bytes has outgrown the nearer cache levels: the
+// prefetch of both candidates then pays for its extra loads (below it, it costs
+// 7 to 12%).
+inline constexpr std::size_t prefetch_min_bytes = std::size_t(1) << 19;
+
+template <class P>
+[[nodiscard]] constexpr search_kind search_for(std::size_t n) noexcept {
+	return n * sizeof(P) >= prefetch_min_bytes ? search_kind::prefetch : search_kind::branchless;
+}
+
+// A tail of at least this many entries and bytes is shifted with one memmove; a
+// shorter one is cheaper to move entry by entry than to call into libc for.
+inline constexpr std::size_t shift_memmove_min_entries = 32;
+inline constexpr std::size_t shift_memmove_min_bytes = 256;
+
+template <class K, class T>
+[[nodiscard]] constexpr bool shift_with_memmove(std::size_t tail_entries) noexcept {
+	return bytewise_shift<K, T> && tail_entries >= shift_memmove_min_entries &&
+	       tail_entries * sizeof(std::pair<K, T>) >= shift_memmove_min_bytes;
+}
+
+}  // namespace flat_map_detail
+
 template <class Key, class T, class Compare>
 class flat_map_builder;
 
@@ -198,58 +309,64 @@ public:
 private:
 	friend class flat_map_builder<Key, T, Compare>;
 
-	// Integer keys under the default ordering search branchlessly (the compare
-	// feeds a conditional move); other keys and comparators use std::lower_bound.
+	// Integer keys under the default ordering take the branchless searches (see
+	// flat_map_detail::search_for); other keys and comparators use std::lower_bound.
 	template <class K>
-	static constexpr bool branchless_search =
+	static constexpr bool integer_search =
 		std::is_integral_v<Key> && std::is_integral_v<K> &&
 		(std::is_same_v<Compare, std::less<>> || std::is_same_v<Compare, std::less<Key>>) &&
 		std::is_signed_v<Key> == std::is_signed_v<K>;
 
-	template <class Iter, class K>
-	[[nodiscard]] Iter lower_bound_search(Iter first, Iter last, const K& k) const {
-		if constexpr (branchless_search<K>) {
-			auto n = static_cast<std::size_t>(last - first);
-			if (n == 0)
-				return first;
-			Iter base = first;
-			while (n > 1) {
-				const std::size_t half = n / 2;
-				base = (base[half - 1].first < k) ? base + half : base;
-				n -= half;
-			}
-			return base + (base->first < k ? 1 : 0);
+	template <class K>
+	[[nodiscard]] const value_type* lower_bound_ptr(const K& k) const {
+		namespace fd = flat_map_detail;
+		const value_type* e = v_.data();
+		const std::size_t n = v_.size();
+		if constexpr (integer_search<K>) {
+			return fd::search_for<value_type>(n) == fd::search_kind::prefetch ? fd::lower_bound_prefetch(e, n, k)
+			                                                                  : fd::lower_bound_branchless(e, n, k);
 		} else {
-			return std::lower_bound(first, last, k,
-			                        [this](const value_type& e, const K& key) { return comp_(e.first, key); });
+			return fd::lower_bound_binary(e, n, k, comp_);
 		}
+	}
+
+	// The index at which an insert goes. The shift that follows is O(n), so the prefetching
+	// kernel and its size test would only grow the insert's code.
+	template <class K>
+	[[nodiscard]] std::size_t insert_index(const K& k) const {
+		namespace fd = flat_map_detail;
+		const value_type* e = v_.data();
+		if constexpr (integer_search<K>)
+			return static_cast<std::size_t>(fd::lower_bound_branchless(e, v_.size(), k) - e);
+		else
+			return static_cast<std::size_t>(fd::lower_bound_binary(e, v_.size(), k, comp_) - e);
 	}
 
 	template <class K>
 	[[nodiscard]] auto lower_bound_impl(const K& k) {
-		return lower_bound_search(v_.begin(), v_.end(), k);
+		return v_.begin() + (lower_bound_ptr(k) - v_.data());
 	}
 	template <class K>
 	[[nodiscard]] auto lower_bound_impl(const K& k) const {
-		return lower_bound_search(v_.begin(), v_.end(), k);
+		return v_.begin() + (lower_bound_ptr(k) - v_.data());
 	}
 
-	// Inserts v before `it`. With trivially copyable halves the shift is one
-	// memmove; std::pair itself is not trivially copyable.
-	iterator insert_at(iterator it, value_type&& v) {
-		if constexpr (std::is_trivially_copyable_v<Key> && std::is_trivially_copyable_v<T>) {
-			const auto idx = static_cast<std::size_t>(it - v_.begin());
+	// Inserts v at index idx. A long tail of byte-copyable entries is shifted with one
+	// memmove (see flat_map_detail::bytewise_shift); anything else is moved entry by
+	// entry by vector::insert.
+	iterator insert_at(std::size_t idx, value_type&& v) {
+		if constexpr (flat_map_detail::bytewise_shift<Key, T>) {
 			const std::size_t n = v_.size();
-			v_.push_back(v);  // grows (or not); v is a local, so reallocation is safe
-			value_type* d = v_.data();
-			if (idx < n)
+			if (flat_map_detail::shift_with_memmove<Key, T>(n - idx)) {
+				v_.push_back(v);  // grows (or not); v is a local, so reallocation is safe
+				value_type* d = v_.data();
 				std::memmove(static_cast<void*>(d + idx + 1), static_cast<const void*>(d + idx),
 				             (n - idx) * sizeof(value_type));
-			std::memcpy(static_cast<void*>(d + idx), static_cast<const void*>(&v), sizeof(value_type));
-			return v_.begin() + static_cast<difference_type>(idx);
-		} else {
-			return v_.insert(it, std::move(v));
+				std::memcpy(static_cast<void*>(d + idx), static_cast<const void*>(&v), sizeof(value_type));
+				return v_.begin() + static_cast<difference_type>(idx);
+			}
 		}
+		return v_.insert(v_.begin() + static_cast<difference_type>(idx), std::move(v));
 	}
 	template <class Self, class K>
 	static auto find_impl(Self& self, const K& k) {
@@ -274,12 +391,12 @@ private:
 			                std::forward_as_tuple(std::forward<Args>(args)...));
 			return {std::prev(v_.end()), true};
 		}
-		auto it = lower_bound_impl(k);
-		if (it != v_.end() && !comp_(k, it->first))
-			return {it, false};
-		it = insert_at(it, value_type(std::piecewise_construct, std::forward_as_tuple(std::forward<K>(k)),
-		                              std::forward_as_tuple(std::forward<Args>(args)...)));
-		return {it, true};
+		const std::size_t idx = insert_index(k);
+		if (idx != v_.size() && !comp_(k, v_[idx].first))
+			return {v_.begin() + static_cast<difference_type>(idx), false};
+		return {insert_at(idx, value_type(std::piecewise_construct, std::forward_as_tuple(std::forward<K>(k)),
+		                                  std::forward_as_tuple(std::forward<Args>(args)...))),
+		        true};
 	}
 
 	std::pair<iterator, bool> emplace_value(value_type&& v) {
@@ -287,11 +404,10 @@ private:
 			v_.push_back(std::move(v));
 			return {std::prev(v_.end()), true};
 		}
-		auto it = lower_bound_impl(v.first);
-		if (it != v_.end() && !comp_(v.first, it->first))
-			return {it, false};
-		it = insert_at(it, std::move(v));
-		return {it, true};
+		const std::size_t idx = insert_index(v.first);
+		if (idx != v_.size() && !comp_(v.first, v_[idx].first))
+			return {v_.begin() + static_cast<difference_type>(idx), false};
+		return {insert_at(idx, std::move(v)), true};
 	}
 
 	template <class K, class M>
@@ -300,13 +416,12 @@ private:
 			v_.emplace_back(std::forward<K>(k), std::forward<M>(obj));
 			return {std::prev(v_.end()), true};
 		}
-		auto it = lower_bound_impl(k);
-		if (it != v_.end() && !comp_(k, it->first)) {
-			it->second = std::forward<M>(obj);
-			return {it, false};
+		const std::size_t idx = insert_index(k);
+		if (idx != v_.size() && !comp_(k, v_[idx].first)) {
+			v_[idx].second = std::forward<M>(obj);
+			return {v_.begin() + static_cast<difference_type>(idx), false};
 		}
-		it = insert_at(it, value_type(std::forward<K>(k), std::forward<M>(obj)));
-		return {it, true};
+		return {insert_at(idx, value_type(std::forward<K>(k), std::forward<M>(obj))), true};
 	}
 
 	template <class K>

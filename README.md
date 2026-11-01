@@ -95,26 +95,47 @@ Not for:
 
 ## ⚡ Performance
 
-ns per random lookup (`find(stream)`), flat-map / Boost.Container `flat_map`, best of 5,
-`-O3 -DNDEBUG`. The comparator is the `flat_map` of Boost 1.92.0. Apple M4 Pro and Intel
-Core i9-9980HK, both with Apple clang 17.
+ns per `find(stream)`: one lookup of a key drawn at random from a stream of 262,144 keys that
+are all in the map, so a branch predictor has no order to learn. Each row names the key and
+mapped type (`<u64,string>` is `u64` keys with `std::string` values) and the entry count, the
+keys random and distinct. The columns are `flat-map` (`kronuz::flat_map`), the `flat_map` of
+[Boost.Container 1.92.0](https://github.com/boostorg/container/tree/boost-1.92.0) (Homebrew,
+the same version on both machines) and `std::map`, the node-based tree most code uses instead;
+the last column is the Boost time divided by the flat-map time. Lower is faster. Each value is
+the best of two runs of the bench, each run the best of 5, and before timing the bench aborts
+unless all the maps return the same hit or miss and the same value for every lookup. Compiler
+`-O3 -DNDEBUG`, Apple clang 17.
 
-| entries | Apple M4 Pro | Intel Core i9-9980HK |
-|---|---|---|
-| `<u32,u32>`, 64 | 2.7 / 4.5 | 4.9 / 8.2 |
-| `<u64,string>`, 1024 | 5.0 / 8.5 | 10.3 / 42.2 |
-| `<u64,u64>`, 4096 | 6.1 / 11.3 | 14.3 / 55.4 |
-| `<u64,u64>`, 65536 | 25.8 / 38.2 | 46.8 / 114 |
-| `<u64,u64>`, 1048576 | 69.6 / 148 | 109 / 253 |
+Apple M4 Pro, macOS 26:
+
+| `find(stream)`, ns | flat-map | Boost.Container `flat_map` | `std::map` | flat-map vs Boost |
+| --- | ---: | ---: | ---: | ---: |
+| `<u32,u32>`, 64 entries | 2.8 | 4.7 | 16.4 | 1.7x faster |
+| `<u64,string>`, 1024 entries | 5.0 | 8.8 | 25.8 | 1.7x faster |
+| `<u64,u64>`, 4096 entries | 6.4 | 11.2 | 35.2 | 1.8x faster |
+| `<u64,u64>`, 65536 entries | 25.9 | 40.1 | 65.1 | 1.5x faster |
+| `<u64,u64>`, 1048576 entries | 64.9 | 177 | 195 | 2.7x faster |
+
+Intel Core i9-9980HK, macOS 15 (x86-64):
+
+| `find(stream)`, ns | flat-map | Boost.Container `flat_map` | `std::map` | flat-map vs Boost |
+| --- | ---: | ---: | ---: | ---: |
+| `<u32,u32>`, 64 entries | 5.6 | 8.1 | 19.3 | 1.5x faster |
+| `<u64,string>`, 1024 entries | 9.9 | 41.7 | 32.1 | 4.2x faster |
+| `<u64,u64>`, 4096 entries | 14.8 | 53.6 | 42.4 | 3.6x faster |
+| `<u64,u64>`, 65536 entries | 51.0 | 117 | 89.7 | 2.3x faster |
+| `<u64,u64>`, 1048576 entries | 101 | 237 | 357 | 2.3x faster |
+
+A sorted vector pays at insert: a random-order insert into 4096 `<u64,u64>` entries takes
+171 ns in flat-map and 37 ns in `std::map` on the M4 Pro. The two M4 Pro runs of the
+1048576-entry row differ by up to 46% per column. [docs/perf/](docs/perf/README.md) has every
+row, the insert and replayed-lookup columns, and the spread between the runs.
 
 ```sh
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DFLAT_MAP_BUILD_BENCH=ON
 cmake --build build --target flat_map_bench
 ./build/flat_map_bench
 ```
-
-[docs/perf/](docs/perf/README.md) has the insert and replayed-lookup columns and
-the search crossover measurements.
 
 ## 📚 Documentation
 

@@ -1,5 +1,7 @@
-// Benchmark: kronuz::flat_map vs boost::container::flat_map and absl::btree_map
-// (each only when its header is found). ns per operation, best of 5.
+// Benchmark: kronuz::flat_map vs boost::container::flat_map, std::map and absl::btree_map
+// (Boost and abseil only when their headers are found). ns per operation, best of 5.
+// Before timing a shape, every map is checked to answer every query like kronuz::flat_map
+// (same hit or miss, same value) and the run aborts on a difference.
 //
 //   insert        random-order try_emplace into an empty map (skipped above
 //                 65536 entries: a sorted vector shifts O(n) per insert)
@@ -16,6 +18,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <random>
 #include <set>
 #include <string>
@@ -93,6 +96,26 @@ static void row(const char* name, std::size_t n, const std::vector<K>& keys, con
 	std::fflush(stdout);
 }
 
+// Aborts unless M answers every probe key like the reference map: both miss, or both hit with an
+// equal value.
+template <class M, class Ref, class K>
+static void verify(const char* name, const Ref& ref, const std::vector<K>& sorted, const std::vector<K>& probes) {
+	M m;
+	for (auto& k : sorted) m.try_emplace(k, ref.find(k)->second);
+	for (auto& k : probes) {
+		auto a = ref.find(k);
+		auto b = m.find(k);
+		if ((a == ref.end()) != (b == m.end()) || (a != ref.end() && !(a->second == b->second))) {
+			std::fprintf(stderr, "bench: %s answers a lookup differently from kronuz::flat_map\n", name);
+			std::abort();
+		}
+	}
+	if (m.size() != ref.size()) {
+		std::fprintf(stderr, "bench: %s holds %zu entries, kronuz::flat_map %zu\n", name, std::size_t(m.size()), std::size_t(ref.size()));
+		std::abort();
+	}
+}
+
 // One shape (key type, mapped type, size) against every comparator.
 template <class K, class V, class MakeK, class MakeV>
 static void shape(const char* label, std::size_t n, std::size_t outer, MakeK mk, MakeV mv) {
@@ -108,10 +131,28 @@ static void shape(const char* label, std::size_t n, std::size_t outer, MakeK mk,
 	std::vector<K> stream(std::size_t(1) << 18);
 	for (auto& k : stream) k = keys[rng() % n];
 	std::printf("%s\n", label);
+	{
+		// Probes: every key, the random stream, and fresh keys (misses, or hits for narrow key types).
+		auto sorted = keys;
+		std::sort(sorted.begin(), sorted.end());
+		kronuz::flat_map<K, V> ref;
+		for (auto& k : sorted) ref.try_emplace(k, mv(k));
+		auto probes = keys;
+		probes.insert(probes.end(), stream.begin(), stream.end());
+		for (int i = 0; i < 4096; ++i) probes.push_back(mk(rng));
+		verify<std::map<K, V>>("std::map", ref, sorted, probes);
+#ifdef HAVE_BOOST_FLAT
+		verify<boost::container::flat_map<K, V>>("boost flat_map", ref, sorted, probes);
+#endif
+#ifdef HAVE_ABSL_BTREE
+		verify<absl::btree_map<K, V>>("absl::btree_map", ref, sorted, probes);
+#endif
+	}
 	row<kronuz::flat_map<K, V>>("kronuz::flat_map", n, keys, q, stream, mv, outer);
 #ifdef HAVE_BOOST_FLAT
 	row<boost::container::flat_map<K, V>>("boost flat_map", n, keys, q, stream, mv, outer);
 #endif
+	row<std::map<K, V>>("std::map", n, keys, q, stream, mv, outer);
 #ifdef HAVE_ABSL_BTREE
 	row<absl::btree_map<K, V>>("absl::btree_map", n, keys, q, stream, mv, outer);
 #endif

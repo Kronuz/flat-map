@@ -6,6 +6,12 @@ releases, so entries are dated.
 
 ## 2026-11-01
 
+### Added
+
+- `flat_map_bench` times `std::map` beside flat-map, Boost.Container's `flat_map` and
+  abseil's `btree_map`, and aborts unless every map answers every probe like flat-map (the
+  same hit or miss, the same value) before it times a row.
+
 ### Changed
 
 - `flat_map_bench` and `flat_map_crossover` build only with `-DFLAT_MAP_BUILD_BENCH=ON`

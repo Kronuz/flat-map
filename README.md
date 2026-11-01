@@ -95,17 +95,17 @@ Not for:
 
 ## ⚡ Performance
 
-ns per random lookup (`find(stream)`), flat-map / Boost.Container `flat_map`,
-best of 5, `-O3 -DNDEBUG`. Apple M1 Pro with Apple clang 21; Intel Core i9-9980HK
-with Apple clang 17. The Boost version is not recorded with these runs.
+ns per random lookup (`find(stream)`), flat-map / Boost.Container `flat_map`, best of 5,
+`-O3 -DNDEBUG`. The comparator is the `flat_map` of Boost 1.92.0. Apple M4 Pro and Intel
+Core i9-9980HK, both with Apple clang 17.
 
-| entries | Apple M1 Pro | Intel Core i9-9980HK |
+| entries | Apple M4 Pro | Intel Core i9-9980HK |
 |---|---|---|
-| `<u32,u32>`, 64 | 4.1 / 6.3 | 4.8 / 8.1 |
-| `<u64,string>`, 1024 | 7.5 / 11.7 | 9.4 / 42.6 |
-| `<u64,u64>`, 4096 | 9.4 / 15.0 | 14.3 / 53.9 |
-| `<u64,u64>`, 65536 | 29.9 / 42.9 | 58.1 / 116 |
-| `<u64,u64>`, 1048576 | 84.6 / 144 | 110 / 243 |
+| `<u32,u32>`, 64 | 2.7 / 4.5 | 4.9 / 8.2 |
+| `<u64,string>`, 1024 | 5.0 / 8.5 | 10.3 / 42.2 |
+| `<u64,u64>`, 4096 | 6.1 / 11.3 | 14.3 / 55.4 |
+| `<u64,u64>`, 65536 | 25.8 / 38.2 | 46.8 / 114 |
+| `<u64,u64>`, 1048576 | 69.6 / 148 | 109 / 253 |
 
 ```sh
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DFLAT_MAP_BUILD_BENCH=ON

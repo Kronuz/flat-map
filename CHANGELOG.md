@@ -4,6 +4,14 @@ All notable changes to `flat-map`. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the library has no
 releases, so entries are dated.
 
+## 2026-11-01
+
+### Changed
+
+- `flat_map_bench` and `flat_map_crossover` build only with `-DFLAT_MAP_BUILD_BENCH=ON`
+  (they were targets left out of the default build and built by name). The comparators,
+  boost `flat_map` and abseil `btree_map`, are found by those targets alone.
+
 ## 2026-10-31
 
 ### Fixed

@@ -114,7 +114,7 @@ the `flat_map` row. `FLAT_MAP_BENCH_SMALL=1` skips tables above 65536 entries
 and `FLAT_MAP_BENCH_FIND_ONLY=1` times only `find`:
 
 ```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DFLAT_MAP_BUILD_BENCH=ON
 cmake --build build --target flat_map_bench && ./build/flat_map_bench
 cmake --build build --target flat_map_crossover && ./build/flat_map_crossover search
 ```

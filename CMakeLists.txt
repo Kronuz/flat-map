@@ -21,24 +21,28 @@ if(PROJECT_IS_TOP_LEVEL)
   add_executable(flat_map_strategy test/strategy.cc)
   target_link_libraries(flat_map_strategy PRIVATE flat_map::flat_map)
   add_test(NAME flat_map_strategy COMMAND flat_map_strategy)
-  # Benchmark (not built by default): cmake --build build --target flat_map_bench
-  # Comparators (boost::container::flat_map, abseil btree_map) are used only by this target,
-  # each when found; bench.cc builds without either.
-  add_executable(flat_map_bench EXCLUDE_FROM_ALL bench/bench.cc)
-  target_link_libraries(flat_map_bench PRIVATE flat_map::flat_map)
-  target_compile_options(flat_map_bench PRIVATE -O3 -DNDEBUG)
-  find_package(absl QUIET)
-  if(absl_FOUND)
-    target_link_libraries(flat_map_bench PRIVATE absl::btree)
+  # Benchmarks (off by default): flat_map_bench and flat_map_crossover.
+  #   cmake -B build -DCMAKE_BUILD_TYPE=Release -DFLAT_MAP_BUILD_BENCH=ON && cmake --build build
+  # Comparators (boost::container::flat_map, abseil btree_map) are used only by these targets, each
+  # when found; bench.cc builds without either.
+  option(FLAT_MAP_BUILD_BENCH "Build bench/bench.cc and bench/crossover.cc" OFF)
+  if(FLAT_MAP_BUILD_BENCH)
+    add_executable(flat_map_bench bench/bench.cc)
+    target_link_libraries(flat_map_bench PRIVATE flat_map::flat_map)
+    target_compile_options(flat_map_bench PRIVATE -O3 -DNDEBUG)
+    find_package(absl QUIET)
+    if(absl_FOUND)
+      target_link_libraries(flat_map_bench PRIVATE absl::btree)
+    endif()
+    find_path(BOOST_FLAT_MAP_INCLUDE boost/container/flat_map.hpp HINTS /opt/homebrew/include /usr/local/include)
+    if(BOOST_FLAT_MAP_INCLUDE)
+      target_include_directories(flat_map_bench PRIVATE ${BOOST_FLAT_MAP_INCLUDE})
+    endif()
+    # The measurements behind the search and insert policy: flat_map_crossover search|insert.
+    add_executable(flat_map_crossover bench/crossover.cc)
+    target_link_libraries(flat_map_crossover PRIVATE flat_map::flat_map)
+    target_compile_options(flat_map_crossover PRIVATE -O3 -DNDEBUG)
   endif()
-  find_path(BOOST_FLAT_MAP_INCLUDE boost/container/flat_map.hpp HINTS /opt/homebrew/include /usr/local/include)
-  if(BOOST_FLAT_MAP_INCLUDE)
-    target_include_directories(flat_map_bench PRIVATE ${BOOST_FLAT_MAP_INCLUDE})
-  endif()
-  # The measurements behind the search and insert policy: flat_map_crossover search|insert.
-  add_executable(flat_map_crossover EXCLUDE_FROM_ALL bench/crossover.cc)
-  target_link_libraries(flat_map_crossover PRIVATE flat_map::flat_map)
-  target_compile_options(flat_map_crossover PRIVATE -O3 -DNDEBUG)
   add_executable(flat_map_demo examples/demo.cc)
   target_link_libraries(flat_map_demo PRIVATE flat_map::flat_map)
 endif()

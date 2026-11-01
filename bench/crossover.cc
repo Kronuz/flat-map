@@ -124,7 +124,7 @@ struct Mini {
 };
 
 template <class K, class V, class MakeV>
-static void insert_row(const char* name, std::size_t n, MakeV mv) {
+static void insert_row_bytes(const char* name, std::size_t n, MakeV mv) {
 	static_assert(fd::bytewise_shift<K, V>);
 	std::mt19937_64 rng(n * 31 + sizeof(V));
 	std::vector<K> keys(n);
@@ -145,6 +145,19 @@ static void insert_row(const char* name, std::size_t n, MakeV mv) {
 	}
 	std::printf("\n");
 	std::fflush(stdout);
+}
+
+// The byte shift is allowed for the pairs the library shifts by bytes; where a standard library
+// keeps a pair's copy constructor non-trivial (FreeBSD's libc++ for std::pair<unsigned, unsigned>)
+// there is nothing to compare.
+template <class K, class V, class MakeV>
+static void insert_row(const char* name, std::size_t n, MakeV mv) {
+	if constexpr (fd::bytewise_shift<K, V>) {
+		insert_row_bytes<K, V>(name, n, mv);
+	} else {
+		std::printf("%-14s sz=%-3zu n=%-6zu  skipped: this standard library does not allow a byte shift here\n", name,
+		            sizeof(std::pair<K, V>), n);
+	}
 }
 
 int main(int argc, char** argv) {

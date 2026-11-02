@@ -39,7 +39,7 @@ inserts. For usage see [README.md](README.md); for measurements see
 
 ## Search
 
-A lookup runs one of three searches, picked from the key type and the table size:
+A lookup runs one of four searches, picked from the key type and the table size:
 
 - **Integer keys** under `std::less<>` or `std::less<Key>` use a branchless lower
   bound. Each step compares and selects the next base with a conditional move, so
@@ -49,14 +49,26 @@ A lookup runs one of three searches, picked from the key type and the table size
   the loop-carried select back into a branch, and the search is no faster than
   `std::lower_bound`. The loop walks pointers and loads through the candidate it
   may select, which keeps one operation off the dependent chain on arm64.
-- **A table of 512 KiB or more** (`size() * sizeof(value_type)`) uses the same
-  search and prefetches both candidates of the next step, so the cache misses of
-  one query overlap instead of chaining. Below that size the extra loads cost 7 to
-  12%.
+- **A table of fewer than 8192 entries (and under 512 KiB)** unrolls that search.
+  One probe at `top - 1`, with `top` the largest power of two below `size()`,
+  places a window of `top` entries; the steps `top / 2`, `top / 4`, ..., 1 follow,
+  entered through a jump table, and one last probe settles the answer. Every step is
+  a compare against a fixed offset, an address and a select (three instructions
+  on x86), against nine for the loop's step, and the lookup is inlined whole. The
+  loop spends as many instructions on its bookkeeping as on its probes; when the same
+  table is queried again and again, those instructions set the speed, not the
+  dependent loads. The select is kept a conditional move by hiding from the compiler
+  that the candidate is the base plus a constant (an empty `asm`), which would
+  otherwise fold it into a compare, a shift and an add; g++ needs the same hiding on
+  the first and the last select, or it compiles them as branches.
+- **A table of 512 KiB or more** (`size() * sizeof(value_type)`) uses the loop and
+  prefetches both candidates of the next step, so the cache misses of one query
+  overlap instead of chaining. Below that size the extra loads cost 7 to 12%.
 - **Other keys and comparators** use `std::lower_bound`.
 
 A branch predictor can learn `std::lower_bound` when a short table (a few hundred
-entries) is queried in the same order again and again. The trade-offs per query
+entries) is queried in the same order again and again, which no loop-based branchless
+search keeps up with; the unrolled search does. The trade-offs per query
 stream are in [docs/perf/](docs/perf/README.md); `bench/crossover.cc` measures both
 streams for every strategy. `flat_map_detail::search_for` is the one place that
 picks the search.

@@ -52,18 +52,18 @@ The benchmark builds without abseil or Boost; abseil adds a `btree_map` row and 
 
 | entries | insert | find | find(stream) |
 | --- | --- | --- | --- |
-| `<u64,u64>` 256 | 30.0 / 27.3 / 54.6 | 7.3 / 8.7 / 11.1 | 7.3 / 34.3 / 23.9 |
-| `<u64,u64>` 4096 | 190 / 213 / 130 | 14.5 / 52.1 / 40.1 | 14.8 / 53.6 / 42.4 |
+| `<u64,u64>` 256 | 30.0 / 27.3 / 54.6 | 5.8 / 8.7 / 11.1 | 5.8 / 34.3 / 23.9 |
+| `<u64,u64>` 4096 | 190 / 213 / 130 | 10.7 / 52.1 / 40.1 | 11.0 / 53.6 / 42.4 |
 | `<u64,u64>` 65536 | 5445 / 5450 / 209 | 46.8 / 113 / 90.7 | 51.0 / 117 / 89.7 |
 | `<u64,u64>` 1048576 | - / - / - | 106 / 244 / 364 | 101 / 237 / 357 |
-| `<u32,u32>` 16 | 25.1 / 34.4 / 53.3 | 4.0 / 5.7 / 3.3 | 5.0 / 7.2 / 11.0 |
-| `<u32,u32>` 64 | 19.4 / 25.0 / 54.1 | 4.9 / 7.7 / 6.2 | 5.6 / 8.1 / 19.3 |
-| `<u32,u32>` 4096 | 89.6 / 94.2 / 129 | 10.6 / 17.4 / 40.2 | 10.6 / 18.4 / 40.6 |
-| `<i8,u64>` 100 | 22.8 / 20.9 / 56.6 | 6.4 / 4.8 / 6.9 | 6.9 / 24.8 / 20.7 |
+| `<u32,u32>` 16 | 25.1 / 34.4 / 53.3 | 3.7 / 5.7 / 3.3 | 3.9 / 7.2 / 11.0 |
+| `<u32,u32>` 64 | 19.4 / 25.0 / 54.1 | 4.6 / 7.7 / 6.2 | 4.5 / 8.1 / 19.3 |
+| `<u32,u32>` 4096 | 89.6 / 94.2 / 129 | 8.2 / 17.4 / 40.2 | 8.4 / 18.4 / 40.6 |
+| `<i8,u64>` 100 | 22.8 / 20.9 / 56.6 | 4.7 / 4.8 / 6.9 | 4.7 / 24.8 / 20.7 |
 | `<string,u64>` 32 | 58.8 / 55.4 / 85.8 | 48.9 / 47.5 / 50.6 | 57.0 / 57.6 / 56.0 |
-| `<u64,string>` 1024 | 322 / 353 / 153 | 9.8 / 39.6 / 28.1 | 9.9 / 41.7 / 32.1 |
+| `<u64,string>` 1024 | 322 / 353 / 153 | 7.1 / 39.6 / 28.1 | 7.1 / 41.7 / 32.1 |
 | `<string,string>` 1024 | 561 / 606 / 268 | 135 / 122 / 121 | 127 / 131 / 129 |
-| `<u64,u64[8]>` 1024 | 215 / 292 / 125 | 10.3 / 39.8 / 28.4 | 10.6 / 43.0 / 34.2 |
+| `<u64,u64[8]>` 1024 | 215 / 292 / 125 | 7.3 / 39.8 / 28.4 | 7.3 / 43.0 / 34.2 |
 | `<u64,u64[8]>` 262144 | - / - / - | 89.1 / 206 / 262 | 91.1 / 204 / 270 |
 
 ## Spread between the two runs
@@ -78,10 +78,11 @@ smaller rows 17% and the worst of the large rows 4.1%.
 
 A branch predictor can learn a binary search when a short table (a few hundred entries) is
 queried in the same order again and again. On the i9, `<i8,u64>` with 100 entries, replayed,
-takes 4.8 ns in Boost.Container's `flat_map` and 6.4 ns with the branchless search, so
-flat-map loses that row. On a random query stream, for integer keys, the branchless search
-is 1.4 to 4.7 times faster than Boost.Container's `flat_map` on x86 and 1.5 to 2.7 times
-faster on arm64. With `std::string` keys flat-map and Boost.Container's `flat_map` are within
+takes 4.8 ns in Boost.Container's `flat_map` and 5.1 ns with `std::lower_bound`; the unrolled
+search takes 4.7 ns there, and 4.7 ns on a random stream, where `std::lower_bound` takes 25 ns.
+Under 8192 entries a search is 3 instructions per step, and the lookup that holds it is inlined.
+On a random query stream, for integer keys, the search is 1.8 to 5.9 times faster than
+Boost.Container's `flat_map` on x86 and 1.5 to 2.7 times faster on arm64. With `std::string` keys flat-map and Boost.Container's `flat_map` are within
 3% of each other, and `std::map` is faster by 12% and 14% on the M4 Pro (`<string,u64>` 32
 entries and `<string,string>` 1024 entries): the string compare dominates and a tree does
 fewer of them.

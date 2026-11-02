@@ -6,8 +6,69 @@ releases, so entries are dated.
 
 ## 2026-11-01
 
+### Fixed
+
+- A short table of integer keys, queried in the same order again and again, was slower than it
+  was before the branchless search (`<i8,u64>`, 100 entries, replayed `find`, i9: 5.1 ns with
+  `std::lower_bound`, 6.2 ns with the loop). The loop's step is nine instructions (halve, scale,
+  load, compare, address, select, exit test); with the order learned, a predictor hides the
+  branches of `std::lower_bound`, and the instruction count, not the dependent loads, sets the
+  time. Tables of fewer than 8192 entries (and under 512 KiB) are now searched by
+  `flat_map_detail::lower_bound_unrolled`: a step is a compare against a fixed offset, an address
+  and a select (three instructions), entered through a jump table, and the lookup is inlined
+  whole. The same row takes 4.66 ns; random queries take 4.66 ns against 6.40 (HEAD) and 24.92
+  (`std::lower_bound`). i9 (Apple clang 17.0.0, 5 rounds, median, ns; START /
+  2026-11-01 before / now):
+
+  | row | `find` | `find(stream)` |
+  | --- | ---: | ---: |
+  | `<i8,u64>` 100 | 5.14 / 6.19 / 4.66 | 24.92 / 6.40 / 4.66 |
+  | `<u32,u32>` 16 | 5.77 / 4.28 / 4.00 | 7.21 / 4.03 / 3.92 |
+  | `<u32,u32>` 64 | 8.42 / 5.95 / 4.75 | 7.62 / 5.72 / 4.52 |
+  | `<u32,u32>` 4096 | 17.32 / 10.66 / 8.21 | 18.02 / 10.78 / 8.71 |
+  | `<u64,u64>` 4096 | 53.30 / 13.96 / 10.74 | 54.95 / 15.13 / 11.17 |
+  | `<u64,string>` 1024 | 37.54 / 9.39 / 7.11 | 44.39 / 10.06 / 7.42 |
+  | `<u64,u64[8]>` 1024 | 38.96 / 10.32 / 7.34 | 43.83 / 10.48 / 7.47 |
+
+  The replayed row has a spread of its own: a byte copy of the START binary read 5.60 ns (0.89 of
+  START, rounds 0.86 to 1.06), and the per-round START / now ratio is 1.09 (0.93 to 1.16). The
+  tables of 65536 entries or more keep the loop and its prefetch, and read as before (within the
+  spread of those rows, 0.95 to 1.02 of HEAD). M4 Pro (5 rounds, median; the search measured
+  there lacks the power-of-two saving below): `<i8,u64>` 100 replayed `find` 4.71 / 3.17 / 2.92
+  ns, `find(stream)` 8.13 / 3.15 / 2.92; M1 Pro (7 rounds, a busy host), the search of this
+  entry: 6.66 / 4.87 / 4.11 and 10.80 / 4.85 / 4.01; `<u32,u32>` 16 `find(stream)` 5.00 / 2.83 /
+  2.50, 64 entries 6.17 / 4.10 / 3.49, `<u64,u64>` 4096 15.05 / 9.66 / 7.63.
+
+### Changed
+
+- `flat_map_detail::search_kind` has a third value, `unrolled`; `search_for` returns it for a table
+  below `unrolled_limit<P>` entries (8192 entries and 512 KiB, whichever comes first).
+- With one probe at `top - 1`, `top` the largest power of two below `size()`, the unrolled search
+  makes no more probes than the loop for any size; with the largest power of two not above `size()`
+  it made one more at every power of two (`<u32,u32>` 16 `find(stream)`, M1 Pro: 2.92 against 2.83
+  ns for the loop, 2.50 now).
+- `lower_bound_ptr`, `lower_bound_impl`, `find_impl` and `find` are `always_inline` where the
+  compiler supports it: called out of line, a lookup pays a call and the registers it saves, and
+  compilers refuse that inlining on size alone (clang 21 did).
+- The select of every step goes through an empty `asm` that hides the candidate pointer from the
+  optimizer; clang otherwise folds `c ? base + S : base` into a compare, a shift and an add (five
+  instructions against three, and two cycles more on the chain). g++ also needs it on the first
+  and the last select, which it threads into branches without it (random queries 17 ns against
+  10 ns, g++ 11.2 on an AMD EPYC 7763 VM); those two are g++-only, so the code clang compiles is
+  the code that was measured.
+- `bench/crossover.cc search` prints the unrolled search beside the others.
+
 ### Added
 
+- `test/strategy.cc` pins the unrolled search against `std::lower_bound` at every width (sizes 0
+  to 130 and around each power of two up to 20000, nine key types), the strategy table with its
+  byte bound (72-byte entries leave the unrolled search at 7282 entries) and `find`,
+  `lower_bound` and `contains` of a `flat_map` across the 4096, 8192 and prefetch boundaries
+  against `std::map`. It fails to compile against the 2026-10-31 header, and fails on each of
+  these mutants (g++ 11.2): last step dropped, a middle step dropped, a wrong first probe, a wrong
+  step offset, the one-entry table, the fallback beyond 8191 entries, no unrolled search, no byte
+  bound, a 16384-entry limit. Two edits survive because they change no answer (the one-entry
+  guard, which the fallback covers, and the prefetch dispatch, which `search_for` pins).
 - `flat_map_bench` times `std::map` beside flat-map, Boost.Container's `flat_map` and
   abseil's `btree_map`, and aborts unless every map answers every probe like flat-map (the
   same hit or miss, the same value) before it times a row.

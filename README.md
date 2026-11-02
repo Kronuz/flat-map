@@ -22,7 +22,8 @@ it when a map is built in bulk and read far more often than it changes.
 - **Linear merge.** `flat_map_merge(a, b, a_only, b_only, both)` walks two maps
   in one pass and calls one callback per key.
 - **Branchless integer search.** Integer keys under `std::less` select each step
-  with a conditional move; tables of 512 KiB or more also prefetch the next step.
+  with a conditional move; tables below 8192 entries unroll every step, and tables of
+  512 KiB or more prefetch the next step.
 - **Byte shifts where valid.** A middle insert moves a tail of 32 entries (and
   256 bytes) or more with one `memmove` when the entry type allows it.
 - **Heterogeneous lookup.** With the default `std::less<>`, `find`, `at`,
@@ -120,9 +121,9 @@ Intel Core i9-9980HK, macOS 15 (x86-64):
 
 | `find(stream)`, ns | flat-map | Boost.Container `flat_map` | `std::map` | flat-map vs Boost |
 | --- | ---: | ---: | ---: | ---: |
-| `<u32,u32>`, 64 entries | 5.6 | 8.1 | 19.3 | 1.5x faster |
-| `<u64,string>`, 1024 entries | 9.9 | 41.7 | 32.1 | 4.2x faster |
-| `<u64,u64>`, 4096 entries | 14.8 | 53.6 | 42.4 | 3.6x faster |
+| `<u32,u32>`, 64 entries | 4.5 | 8.1 | 19.3 | 1.8x faster |
+| `<u64,string>`, 1024 entries | 7.1 | 41.7 | 32.1 | 5.9x faster |
+| `<u64,u64>`, 4096 entries | 11.0 | 53.6 | 42.4 | 4.9x faster |
 | `<u64,u64>`, 65536 entries | 51.0 | 117 | 89.7 | 2.3x faster |
 | `<u64,u64>`, 1048576 entries | 101 | 237 | 357 | 2.3x faster |
 

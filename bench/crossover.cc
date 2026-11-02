@@ -1,7 +1,8 @@
 // Crossover measurements behind the search and insert policy in flat_map.hh
 // (flat_map_detail::search_for and shift_with_memmove). ns per operation, best of 5.
 //
-//   flat_map_crossover search   std::lower_bound vs the branchless search vs the prefetching one,
+//   flat_map_crossover search   std::lower_bound vs the branchless search vs the unrolled one (tables
+//                               below flat_map_detail::unrolled_limit) vs the prefetching one,
 //                               plus the same loop without the unpredictable hint ("unhinted"),
 //                               on a repeating query sequence (cyc: a branch predictor can learn
 //                               a short table) and on a long random one (rnd).
@@ -87,8 +88,12 @@ static void search_row(const char* name, std::size_t n) {
 		const double u = time([](const P* p, std::size_t m, K k) { return lower_bound_unhinted(p, m, k); }, qs);
 		const double b = time([](const P* p, std::size_t m, K k) { return fd::lower_bound_branchless(p, m, k); }, qs);
 		const double f = time([](const P* p, std::size_t m, K k) { return fd::lower_bound_prefetch(p, m, k); }, qs);
-		std::printf("%-14s sz=%-3zu n=%-8zu %s  std %7.2f  unhinted %7.2f  branchless %7.2f  prefetch %7.2f\n", name, sizeof(P), n,
-		            stream ? "rnd" : "cyc", s, u, b, f);
+		// The unrolled search is defined for tables below its limit only.
+		const double r = n < fd::unrolled_limit<P>
+		                     ? time([](const P* p, std::size_t m, K k) { return fd::lower_bound_unrolled(p, m, k); }, qs)
+		                     : -1;
+		std::printf("%-14s sz=%-3zu n=%-8zu %s  std %7.2f  unhinted %7.2f  branchless %7.2f  unrolled %7.2f  prefetch %7.2f\n", name,
+		            sizeof(P), n, stream ? "rnd" : "cyc", s, u, b, r, f);
 		std::fflush(stdout);
 	}
 }

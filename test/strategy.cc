@@ -46,6 +46,8 @@ void check_kernels_on(const std::vector<std::pair<K, int>>& v, const std::vector
 		CHECK(fd::lower_bound_binary(e, n, q, std::less<>{}) == want);
 		CHECK(fd::lower_bound_branchless(e, n, q) == want);
 		CHECK(fd::lower_bound_prefetch(e, n, q) == want);
+		CHECK(fd::lower_bound_unrolled(e, n, q) == want);
+		CHECK(fd::lower_bound_large(e, n, q) == want);
 	}
 }
 
@@ -55,7 +57,11 @@ void kernels(std::mt19937_64& rng) {
 	constexpr K hi = std::numeric_limits<K>::max();
 	auto sizes = std::vector<std::size_t>();
 	for (std::size_t n = 0; n <= 130; ++n) sizes.push_back(n);
-	for (std::size_t n : {255u, 256u, 257u, 511u, 512u, 513u, 1000u, 1023u, 1024u, 1025u, 4097u}) sizes.push_back(n);
+	// Every width of the unrolled search is one of 1..13 bits: sizes on and around each power of two
+	// up to 8192, where the unrolled search ends and its fallback begins.
+	for (std::size_t n : {255u, 256u, 257u, 511u, 512u, 513u, 1000u, 1023u, 1024u, 1025u, 2047u, 2048u, 2049u,
+	                      4095u, 4096u, 4097u, 8191u, 8192u, 8193u, 20000u})
+		sizes.push_back(n);
 	for (std::size_t n : sizes) {
 		// Dense or sparse key spaces, with duplicates: lower_bound is defined for any sorted input.
 		for (std::uint64_t spread : {std::uint64_t(2), std::uint64_t(40), std::uint64_t(1) << 40}) {
@@ -99,25 +105,41 @@ void tables() {
 	using fd::search_kind;
 	using u64 = std::uint64_t;
 	using u32 = std::uint32_t;
-	CHECK((pick<u64, u64>(0) == search_kind::branchless));
-	CHECK((pick<u64, u64>(64) == search_kind::branchless));
+	CHECK((pick<u64, u64>(0) == search_kind::unrolled));
+	CHECK((pick<u64, u64>(64) == search_kind::unrolled));
 	CHECK((pick<u64, u64>(1u << 24) == search_kind::prefetch));
 	CHECK((pick<u32, u32>(1u << 24) == search_kind::prefetch));
-	// Every integer-keyed table of any size is searched branchlessly, small ones included.
-	CHECK((pick<std::int8_t, u64>(100) == search_kind::branchless));
-	CHECK((pick<u32, u32>(16) == search_kind::branchless));
+	// A short table of any integer key is searched by the unrolled search: no data-dependent branch,
+	// and none of the loop's bookkeeping between the probes.
+	CHECK((pick<std::int8_t, u64>(100) == search_kind::unrolled));
+	CHECK((pick<u32, u32>(16) == search_kind::unrolled));
+	CHECK((pick<u32, u32>(4096) == search_kind::unrolled));
+	// It ends at fewer than 8192 entries, where the loop takes over.
+	CHECK(fd::unrolled_max_entries == 8192);
+	CHECK((pick<u32, u32>(8191) == search_kind::unrolled));
+	CHECK((pick<u32, u32>(8192) == search_kind::branchless));
 	// A table that fits the cache is never prefetched: the extra loads only cost.
-	CHECK((pick<u32, u32>(4096) == search_kind::branchless));
 	CHECK((pick<u64, u64>(16384) == search_kind::branchless));
-	CHECK((pick<u64, std::array<u64, 8>>(4096) == search_kind::branchless));
-	// The boundary is the table size in bytes: 512 KiB.
+	// The prefetch boundary is the table size in bytes: 512 KiB.
 	CHECK((pick<u64, u64>(32767) == search_kind::branchless));
 	CHECK((pick<u64, u64>(32768) == search_kind::prefetch));
-	// More bytes per entry reach the prefetch size at fewer entries.
+	// More bytes per entry reach the prefetch size at fewer entries, and end the unrolled search there
+	// when that comes first: 72-byte entries are prefetched from 7282 entries (524,304 bytes).
+	using wide_pair = std::pair<u64, std::array<u64, 8>>;
+	static_assert(sizeof(wide_pair) == 72);
+	CHECK((pick<u64, std::array<u64, 8>>(4096) == search_kind::unrolled));
+	CHECK((pick<u64, std::array<u64, 8>>(7281) == search_kind::unrolled));
+	CHECK((pick<u64, std::array<u64, 8>>(7282) == search_kind::prefetch));
 	std::size_t narrow = 0, wide = 0;
 	while (pick<u64, u64>(narrow) != search_kind::prefetch) ++narrow;
 	while (pick<u64, std::array<u64, 8>>(wide) != search_kind::prefetch) ++wide;
 	CHECK(wide < narrow);
+	// The unrolled search is exactly the tables below both limits, for any entry size.
+	for (std::size_t n = 0; n < 20000; ++n) {
+		CHECK((pick<std::int8_t, u64>(n) == search_kind::unrolled) == (n < 8192 && n * 16 < (1u << 19)));
+		CHECK((pick<u64, std::array<u64, 8>>(n) == search_kind::unrolled) == (n < 8192 && n * 72 < (1u << 19)));
+		CHECK((pick<u32, u32>(n) == search_kind::unrolled) == (n < 8192));
+	}
 }
 
 // --- the tail shift -------------------------------------------------------------
@@ -224,6 +246,36 @@ void inserts_straddle_threshold(Make make, std::mt19937_64& rng) {
 	}
 }
 
+// find, lower_bound and contains of a flat_map take the unrolled, loop and prefetch searches by
+// size; each answers like std::map at the sizes where the strategy changes.
+template <class K, class T, class Make>
+void lookups_across_strategies(Make make, std::vector<std::size_t> sizes, std::mt19937_64& rng) {
+	for (std::size_t n : sizes) {
+		flat_map<K, T> fm;
+		std::map<K, T> ref;
+		while (ref.size() < n) {
+			const K k = static_cast<K>(rng());
+			ref.try_emplace(k, make(k));
+		}
+		for (const auto& [k, v] : ref) fm.try_emplace(k, v);
+		CHECK(fm.size() == n);
+		for (const auto& [k, v] : ref) {
+			auto it = fm.find(k);
+			CHECK(it != fm.end() && it->first == k);
+			CHECK(std::memcmp(&it->second, &v, sizeof(T)) == 0);
+			CHECK(fm.contains(k));
+		}
+		for (int i = 0; i < 20000; ++i) {
+			const K q = static_cast<K>(rng());
+			const auto want = ref.lower_bound(q);
+			const auto got = fm.lower_bound(q);
+			CHECK((want == ref.end()) == (got == fm.end()));
+			CHECK(want == ref.end() || got->first == want->first);
+			CHECK(fm.contains(q) == (ref.count(q) != 0));
+		}
+	}
+}
+
 void gated_types(std::mt19937_64& rng) {
 	// Each insert into a map of up to 3000 entries shifts a tail of up to that many: with a byte-wise
 	// shift forced on, an entry that points at itself would keep pointing at its old slot.
@@ -261,6 +313,11 @@ int main() {
 	inserts_straddle_threshold<std::uint64_t, Quad>([](std::uint64_t k) { return Quad{k, k + 1, k + 2, k + 3}; }, rng);
 	inserts_straddle_threshold<std::uint64_t, std::array<std::uint64_t, 8>>(
 		[](std::uint64_t k) { std::array<std::uint64_t, 8> w{}; w[0] = k; w[7] = ~k; return w; }, rng);
+	lookups_across_strategies<std::uint32_t, std::uint32_t>([](std::uint32_t k) { return k * 3u; },
+	                                                        {1, 2, 3, 100, 4095, 4096, 8191, 8192, 8193, 30000}, rng);
+	lookups_across_strategies<std::uint64_t, std::array<std::uint64_t, 8>>(
+		[](std::uint64_t k) { std::array<std::uint64_t, 8> w{}; w[0] = k; w[7] = ~k; return w; },
+		{1, 63, 4096, 7281, 7282, 7283, 9000}, rng);
 	gated_types(rng);
 	std::puts("flat_map strategy tests passed");
 }

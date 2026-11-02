@@ -5,6 +5,7 @@
 // Mutation invalidates borrowed entries; bulk operations avoid repeated shifts.
 
 #include <algorithm>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -31,6 +32,23 @@ namespace flat_map_detail {
 #define KRONUZ_FLAT_MAP_UNPREDICTABLE(c) __builtin_expect_with_probability(static_cast<long>(c), 1, 0.5)
 #else
 #define KRONUZ_FLAT_MAP_UNPREDICTABLE(c) (c)
+#endif
+
+// A lookup is inlined whole, the unrolled search included: called out of line, it pays a call
+// and the registers it saves, and compilers refuse to inline it on its size alone.
+// OPAQUE hides that a pointer is another one plus a constant (see descend); g++ also needs it on
+// the first and the last select of the search (OPAQUE_GCC), or it compiles them as branches.
+#if defined(__GNUC__)
+#define KRONUZ_FLAT_MAP_INLINE [[gnu::always_inline]] inline
+#define KRONUZ_FLAT_MAP_OPAQUE(p) __asm__("" : "+r"(p))
+#else
+#define KRONUZ_FLAT_MAP_INLINE inline
+#define KRONUZ_FLAT_MAP_OPAQUE(p) ((void)0)
+#endif
+#if defined(__GNUC__) && !defined(__clang__)
+#define KRONUZ_FLAT_MAP_OPAQUE_GCC(p) KRONUZ_FLAT_MAP_OPAQUE(p)
+#else
+#define KRONUZ_FLAT_MAP_OPAQUE_GCC(p) ((void)0)
 #endif
 
 inline void prefetch(const void* p) noexcept {
@@ -90,6 +108,56 @@ template <class P, class K>
 	return base + (base->first < k ? 1 : 0);
 }
 
+// One step of the unrolled search: base moves on by S entries when the entry S - 1 on is less than
+// k. S is a constant, so the step is a compare against a fixed offset, an address and a select.
+template <std::size_t S, class P, class K>
+[[nodiscard]] KRONUZ_FLAT_MAP_INLINE const P* descend(const P* base, K k) noexcept {
+	const P* next = base + S;
+	KRONUZ_FLAT_MAP_OPAQUE(next);  // else the select folds into base + (c ? S : 0): setcc, shift, add
+	return KRONUZ_FLAT_MAP_UNPREDICTABLE(base[S - 1].first < k) ? next : base;
+}
+
+// Tables of fewer than this many entries are searched by the unrolled search.
+inline constexpr std::size_t unrolled_max_entries = std::size_t(1) << 13;
+
+// The branchless search with every step unrolled, for fewer than unrolled_max_entries entries.
+// With top the largest power of two below n, one probe at top - 1 places a window of top entries
+// that holds the answer; the steps top / 2, top / 4, ..., 1 follow, entered through a jump table at
+// the one that fits, and one last probe settles the answer. That is as many probes as the loop
+// makes for any n, and no more than ceil(log2(n)) + 1. The loop spends as many instructions on its
+// bookkeeping (the halving, the scaling, the exit test) as on the probes, and when the same table
+// is queried again and again those instructions, not the dependent loads, set its speed.
+template <class P, class K>
+[[nodiscard]] KRONUZ_FLAT_MAP_INLINE const P* lower_bound_unrolled(const P* e, std::size_t n, K k) noexcept {
+	if (n < 2)
+		return n == 0 ? e : e + (e->first < k ? 1 : 0);
+	const unsigned width = static_cast<unsigned>(std::bit_width(n - 1));  // top = 2^(width - 1) < n <= 2^width
+	const std::size_t top = std::size_t(1) << (width - 1);
+	const P* first = e + (n - top);
+	KRONUZ_FLAT_MAP_OPAQUE_GCC(first);
+	const P* base = KRONUZ_FLAT_MAP_UNPREDICTABLE(e[top - 1].first < k) ? first : e;
+	switch (width) {
+		case 13: base = descend<2048>(base, k); [[fallthrough]];
+		case 12: base = descend<1024>(base, k); [[fallthrough]];
+		case 11: base = descend<512>(base, k); [[fallthrough]];
+		case 10: base = descend<256>(base, k); [[fallthrough]];
+		case 9: base = descend<128>(base, k); [[fallthrough]];
+		case 8: base = descend<64>(base, k); [[fallthrough]];
+		case 7: base = descend<32>(base, k); [[fallthrough]];
+		case 6: base = descend<16>(base, k); [[fallthrough]];
+		case 5: base = descend<8>(base, k); [[fallthrough]];
+		case 4: base = descend<4>(base, k); [[fallthrough]];
+		case 3: base = descend<2>(base, k); [[fallthrough]];
+		case 2: base = descend<1>(base, k); [[fallthrough]];
+		case 1: break;
+		default: return lower_bound_branchless(e, n, k);
+	}
+	KRONUZ_FLAT_MAP_OPAQUE_GCC(base);
+	const P* after = base + 1;
+	KRONUZ_FLAT_MAP_OPAQUE_GCC(after);
+	return KRONUZ_FLAT_MAP_UNPREDICTABLE(base->first < k) ? after : base;
+}
+
 #undef KRONUZ_FLAT_MAP_UNPREDICTABLE
 
 // A tail shift may copy bytes only where that is what moving each entry does:
@@ -106,16 +174,30 @@ inline constexpr bool bytewise_shift =
 	std::is_trivially_move_constructible_v<std::pair<K, T>> && std::is_trivially_destructible_v<std::pair<K, T>>;
 
 // Which search an integer-keyed map runs over n entries of type P.
-enum class search_kind : unsigned char { branchless, prefetch };
+enum class search_kind : unsigned char { unrolled, branchless, prefetch };
 
 // A table of at least this many bytes has outgrown the nearer cache levels: the
 // prefetch of both candidates then pays for its extra loads (below it, it costs
 // 7 to 12%).
 inline constexpr std::size_t prefetch_min_bytes = std::size_t(1) << 19;
 
+// The tables below this many entries of type P are searched by the unrolled search: fewer than
+// unrolled_max_entries, and below the prefetch size.
+template <class P>
+inline constexpr std::size_t unrolled_limit =
+	std::min(unrolled_max_entries, (prefetch_min_bytes + sizeof(P) - 1) / sizeof(P));
+
 template <class P>
 [[nodiscard]] constexpr search_kind search_for(std::size_t n) noexcept {
+	if (n < unrolled_limit<P>)
+		return search_kind::unrolled;
 	return n * sizeof(P) >= prefetch_min_bytes ? search_kind::prefetch : search_kind::branchless;
+}
+
+// The search of a table the unrolled search does not take.
+template <class P, class K>
+[[nodiscard]] KRONUZ_FLAT_MAP_INLINE const P* lower_bound_large(const P* e, std::size_t n, K k) noexcept {
+	return search_for<P>(n) == search_kind::prefetch ? lower_bound_prefetch(e, n, k) : lower_bound_branchless(e, n, k);
 }
 
 // A tail of at least this many entries and bytes is shifted with one memmove; a
@@ -207,8 +289,8 @@ public:
 		return lower_bound_impl(k);
 	}
 
-	[[nodiscard]] iterator find(const key_type& k) { return find_impl(*this, k); }
-	[[nodiscard]] const_iterator find(const key_type& k) const { return find_impl(*this, k); }
+	[[nodiscard]] KRONUZ_FLAT_MAP_INLINE iterator find(const key_type& k) { return find_impl(*this, k); }
+	[[nodiscard]] KRONUZ_FLAT_MAP_INLINE const_iterator find(const key_type& k) const { return find_impl(*this, k); }
 	template <class K>
 		requires is_transparent<K>
 	[[nodiscard]] iterator find(const K& k) {
@@ -318,13 +400,14 @@ private:
 		std::is_signed_v<Key> == std::is_signed_v<K>;
 
 	template <class K>
-	[[nodiscard]] const value_type* lower_bound_ptr(const K& k) const {
+	[[nodiscard]] KRONUZ_FLAT_MAP_INLINE const value_type* lower_bound_ptr(const K& k) const {
 		namespace fd = flat_map_detail;
 		const value_type* e = v_.data();
 		const std::size_t n = v_.size();
 		if constexpr (integer_search<K>) {
-			return fd::search_for<value_type>(n) == fd::search_kind::prefetch ? fd::lower_bound_prefetch(e, n, k)
-			                                                                  : fd::lower_bound_branchless(e, n, k);
+			if (n < fd::unrolled_limit<value_type>)
+				return fd::lower_bound_unrolled(e, n, k);
+			return fd::lower_bound_large(e, n, k);
 		} else {
 			return fd::lower_bound_binary(e, n, k, comp_);
 		}
@@ -343,11 +426,11 @@ private:
 	}
 
 	template <class K>
-	[[nodiscard]] auto lower_bound_impl(const K& k) {
+	[[nodiscard]] KRONUZ_FLAT_MAP_INLINE auto lower_bound_impl(const K& k) {
 		return v_.begin() + (lower_bound_ptr(k) - v_.data());
 	}
 	template <class K>
-	[[nodiscard]] auto lower_bound_impl(const K& k) const {
+	[[nodiscard]] KRONUZ_FLAT_MAP_INLINE auto lower_bound_impl(const K& k) const {
 		return v_.begin() + (lower_bound_ptr(k) - v_.data());
 	}
 
@@ -369,7 +452,7 @@ private:
 		return v_.insert(v_.begin() + static_cast<difference_type>(idx), std::move(v));
 	}
 	template <class Self, class K>
-	static auto find_impl(Self& self, const K& k) {
+	KRONUZ_FLAT_MAP_INLINE static auto find_impl(Self& self, const K& k) {
 		auto it = self.lower_bound_impl(k);
 		if (it != self.v_.end() && !self.comp_(k, it->first))
 			return it;
@@ -546,3 +629,7 @@ void flat_map_merge(const A& a, const B& b, OnA&& a_only, OnB&& b_only, OnBoth&&
 }
 
 } // namespace kronuz
+
+#undef KRONUZ_FLAT_MAP_INLINE
+#undef KRONUZ_FLAT_MAP_OPAQUE
+#undef KRONUZ_FLAT_MAP_OPAQUE_GCC
